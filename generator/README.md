@@ -9,7 +9,7 @@ Due to the dynamic dependency on NetSNMP, you must build the generator yourself.
 
 ```
 # Debian-based distributions.
-sudo apt-get install build-essential libsnmp-dev # Debian-based distros
+sudo apt-get install unzip build-essential libsnmp-dev # Debian-based distros
 # Redhat-based distributions.
 sudo yum install gcc gcc-g++ make net-snmp net-snmp-utils net-snmp-libs net-snmp-devel # RHEL-based distros
 
@@ -22,7 +22,7 @@ make mibs
 ## Running
 
 ```sh
-export MIBDIRS=$HOME/.snmp/mibs:mibs:/usr/share/snmp/mibs
+export MIBDIRS=mibs
 ./generator generate
 ```
 
@@ -34,12 +34,14 @@ Additional command are available for debugging, use the `help` command to see th
 
 If you would like to run the generator in docker to generate your `snmp.yml` config run the following commands.
 
+The Docker image expects a directory containing the `generator.yml` and a directory called `mibs` that contains all MIBs you wish to use.
+
+This example will generate the example `snmp.yml` which is included in the top level of the snmp_exporter repo:
 ```sh
+make mibs
 docker build -t snmp-generator .
 docker run -ti \
-  -v $HOME/.snmp/mibs:/root/.snmp/mibs \
-  -v $PWD/generator.yml:/opt/generator.yml:ro \
-  -v $PWD/out/:/opt/ \
+  -v "${PWD}:/opt/" \
   snmp-generator generate
 ```
 
@@ -76,7 +78,7 @@ modules:
                                     # Can be noAuthNoPriv, authNoPriv or authPriv.
       password: pass  # Has no default. Also known as authKey, -A option to NetSNMP.
                       # Required if security_level is authNoPriv or authPriv.
-      auth_protocol: SHA  # MD5 or SHA, defaults to SHA. -a option to NetSNMP.
+      auth_protocol: MD5  # MD5 or SHA, defaults to MD5. -a option to NetSNMP.
                           # Used if security_level is authNoPriv or authPriv.
       priv_protocol: DES  # DES or AES, defaults to DES. -x option to NetSNMP.
                           # Used if security_level is authPriv.
@@ -86,14 +88,16 @@ modules:
                             # Required if context is configured on the device.
 
     lookups:  # Optional list of lookups to perform.
-              # This must only be used when the new index is unique.
+              # The default for `keep_source_indexes` is false. Indexes must be unique for this option to be used.
 
       # If the index of a table is bsnDot11EssIndex, usually that'd be the label
       # on the resulting metrics from that table. Instead, use the index to
       # lookup the bsnDot11EssSsid table entry and create a bsnDot11EssSsid label
       # with that value.
-      - old_index: bsnDot11EssIndex
-        new_index: bsnDot11EssSsid
+      - source_indexes: [bsnDot11EssIndex]
+        lookup: bsnDot11EssSsid
+        drop_source_indexes: false  # If true, delete source index labels for this lookup.
+                                    # This avoids label clutter when the new index is unique.
 
      overrides: # Allows for per-module overrides of bits of MIBs
        metricName:
@@ -121,7 +125,27 @@ modules:
                              #   InetAddress: An InetAddress per RFC 4001. Must be preceded by an InetAddressType.
                              #   InetAddressMissingSize: An InetAddress that violates section 4.1 of RFC 4001 by
                              #       not having the size in the index. Must be preceded by an InetAddressType.
+                             #   EnumAsInfo: An enum for which a single timeseries is created. Good for constant values.
+                             #   EnumAsStateSet: An enum with a time series per state. Good for variable low-cardinality enums.
+                             #   Bits: An RFC 2578 BITS construct, which produces a StateSet with a time series per bit.
 ```
+
+### EnumAsInfo and EnumAsStateSet
+
+SNMP contains the concept of integer indexed enumerations (enums). There are two ways
+to represent these strings in Prometheus. They can be "info" metrics, or they can be
+"state sets". SNMP does not specify which should be used, and it's up to the use case
+of the data. Some users may also prefer the raw integer value, rather than the string.
+
+In order to set enum integer to string mapping, you must use one of the two overrides.
+
+`EnumAsInfo` should be used for properties that provide inventory-like data. For example
+a device type, the name of a colour etc. It is important that this value is constant.
+
+`EnumAsStateSet` should be used for things that represent state or that you might want
+to alert on. For example the link state, is it up or down, is it in an error state,
+whether a panel is open or closed etc. Please be careful to not use this for high
+cardinality values as it will generate 1 time series per possible value.
 
 ## Where to get MIBs
 
@@ -136,7 +160,7 @@ Put the extracted mibs in a location NetSNMP can read them from. `$HOME/.snmp/mi
 * Arista Networks: https://www.arista.com/assets/data/docs/MIBS/ARISTA-ENTITY-SENSOR-MIB.txt
                    https://www.arista.com/assets/data/docs/MIBS/ARISTA-SW-IP-FORWARDING-MIB.txt
                    https://www.arista.com/assets/data/docs/MIBS/ARISTA-SMI-MIB.txt
-* Synology: https://global.download.synology.com/download/Document/MIBGuide/Synology_MIB_File.zip
+* Synology: https://global.download.synology.com/download/Document/Software/DeveloperGuide/Firmware/DSM/All/enu/Synology_MIB_File.zip
 * MikroTik: http://download2.mikrotik.com/Mikrotik.mib
 * UCD-SNMP-MIB (Net-SNMP): http://www.net-snmp.org/docs/mibs/UCD-SNMP-MIB.txt
 * Ubiquiti Networks: http://dl.ubnt-ut.com/snmp/UBNT-MIB

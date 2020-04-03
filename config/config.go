@@ -93,26 +93,26 @@ func (c *Module) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		switch wp.Auth.SecurityLevel {
 		case "authPriv":
 			if wp.Auth.PrivPassword == "" {
-				return fmt.Errorf("Priv password is missing, required for SNMPv3 with priv.")
+				return fmt.Errorf("priv password is missing, required for SNMPv3 with priv")
 			}
 			if wp.Auth.PrivProtocol != "DES" && wp.Auth.PrivProtocol != "AES" {
-				return fmt.Errorf("Priv protocol must be DES or AES.")
+				return fmt.Errorf("priv protocol must be DES or AES")
 			}
 			fallthrough
 		case "authNoPriv":
 			if wp.Auth.Password == "" {
-				return fmt.Errorf("Auth password is missing, required for SNMPv3 with auth.")
+				return fmt.Errorf("auth password is missing, required for SNMPv3 with auth")
 			}
 			if wp.Auth.AuthProtocol != "MD5" && wp.Auth.AuthProtocol != "SHA" {
-				return fmt.Errorf("Auth protocol must be SHA or MD5.")
+				return fmt.Errorf("auth protocol must be SHA or MD5")
 			}
 			fallthrough
 		case "noAuthNoPriv":
 			if wp.Auth.Username == "" {
-				return fmt.Errorf("Auth username is missing, required for SNMPv3")
+				return fmt.Errorf("auth username is missing, required for SNMPv3")
 			}
 		default:
-			return fmt.Errorf("Security level must be one of authPriv, authNoPriv or noAuthNoPriv")
+			return fmt.Errorf("security level must be one of authPriv, authNoPriv or noAuthNoPriv")
 		}
 	}
 	return nil
@@ -177,6 +177,7 @@ type Metric struct {
 	Indexes        []*Index                   `yaml:"indexes,omitempty"`
 	Lookups        []*Lookup                  `yaml:"lookups,omitempty"`
 	RegexpExtracts map[string][]RegexpExtract `yaml:"regex_extracts,omitempty"`
+	EnumValues     map[int]string             `yaml:"enum_values,omitempty"`
 }
 
 type Index struct {
@@ -189,8 +190,8 @@ type Index struct {
 type Lookup struct {
 	Labels    []string `yaml:"labels"`
 	Labelname string   `yaml:"labelname"`
-	Oid       string   `yaml:"oid"`
-	Type      string   `yaml:"type"`
+	Oid       string   `yaml:"oid,omitempty"`
+	Type      string   `yaml:"type,omitempty"`
 }
 
 // Secret is a string that must not be revealed on marshaling.

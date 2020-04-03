@@ -14,12 +14,14 @@
 package main
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
-	"github.com/prometheus/common/log"
+	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 
 	"github.com/prometheus/snmp_exporter/config"
 )
@@ -42,7 +44,7 @@ func walkNode(n *Node, f func(n *Node)) {
 }
 
 // Transform the tree.
-func prepareTree(nodes *Node) map[string]*Node {
+func prepareTree(nodes *Node, logger log.Logger) map[string]*Node {
 	// Build a map from names and oids to nodes.
 	nameToNode := map[string]*Node{}
 	walkNode(nodes, func(n *Node) {
@@ -78,7 +80,7 @@ func prepareTree(nodes *Node) map[string]*Node {
 		}
 		augmented, ok := nameToNode[n.Augments]
 		if !ok {
-			log.Warnf("Can't find augmenting oid %s for %s", n.Augments, n.Label)
+			level.Warn(logger).Log("msg", "Can't find augmenting node", "augments", n.Augments, "node", n.Label)
 			return
 		}
 		for _, c := range n.Children {
@@ -155,13 +157,17 @@ func metricType(t string) (string, bool) {
 		return "gauge", true
 	case "counter", "COUNTER", "COUNTER64":
 		return "counter", true
-	case "OctetString", "OCTETSTR", "BITSTRING":
+	case "OctetString", "OCTETSTR":
 		return "OctetString", true
+	case "BITSTRING":
+		return "Bits", true
 	case "InetAddressIPv4", "IpAddr", "IPADDR", "NETADDR":
 		return "InetAddressIPv4", true
 	case "PhysAddress48", "DisplayString", "Float", "Double", "InetAddressIPv6":
 		return t, true
 	case "DateAndTime":
+		return t, true
+	case "EnumAsInfo", "EnumAsStateSet":
 		return t, true
 	default:
 		// Unsupported type.
@@ -246,7 +252,7 @@ func getMetricNode(oid string, node *Node, nameToNode map[string]*Node) (*Node, 
 	return n, oidInstance
 }
 
-func generateConfigModule(cfg *ModuleConfig, node *Node, nameToNode map[string]*Node) *config.Module {
+func generateConfigModule(cfg *ModuleConfig, node *Node, nameToNode map[string]*Node, logger log.Logger) (*config.Module, error) {
 	out := &config.Module{}
 	needToWalk := map[string]struct{}{}
 	tableInstances := map[string][]string{}
@@ -259,7 +265,7 @@ func generateConfigModule(cfg *ModuleConfig, node *Node, nameToNode map[string]*
 		// Find node to override.
 		n, ok := nameToNode[name]
 		if !ok {
-			log.Warnf("Could not find metric '%s' to override type", name)
+			level.Warn(logger).Log("msg", "Could not find node to override type", "node", name)
 			continue
 		}
 		// params.Type validated at generator configuration.
@@ -285,7 +291,7 @@ func generateConfigModule(cfg *ModuleConfig, node *Node, nameToNode map[string]*
 		metricNode, oidType := getMetricNode(oid, node, nameToNode)
 		switch oidType {
 		case oidNotFound:
-			log.Fatalf("Cannot find oid '%s' to walk", oid)
+			return nil, fmt.Errorf("cannot find oid '%s' to walk", oid)
 		case oidSubtree:
 			needToWalk[oid] = struct{}{}
 		case oidInstance:
@@ -322,12 +328,13 @@ func generateConfigModule(cfg *ModuleConfig, node *Node, nameToNode map[string]*
 			}
 
 			metric := &config.Metric{
-				Name:    sanitizeLabelName(n.Label),
-				Oid:     n.Oid,
-				Type:    t,
-				Help:    n.Description + " - " + n.Oid,
-				Indexes: []*config.Index{},
-				Lookups: []*config.Lookup{},
+				Name:       sanitizeLabelName(n.Label),
+				Oid:        n.Oid,
+				Type:       t,
+				Help:       n.Description + " - " + n.Oid,
+				Indexes:    []*config.Index{},
+				Lookups:    []*config.Lookup{},
+				EnumValues: n.EnumValues,
 			}
 
 			if cfg.Overrides[metric.Name].Ignore {
@@ -339,12 +346,12 @@ func generateConfigModule(cfg *ModuleConfig, node *Node, nameToNode map[string]*
 				index := &config.Index{Labelname: i}
 				indexNode, ok := nameToNode[i]
 				if !ok {
-					log.Warnf("Error, can't find index %s for node %s", i, n.Label)
+					level.Warn(logger).Log("msg", "Could not find index for node", "node", n.Label, "index", i)
 					return
 				}
 				index.Type, ok = metricType(indexNode.Type)
 				if !ok {
-					log.Warnf("Error, can't handle index type %s for node %s", indexNode.Type, n.Label)
+					level.Warn(logger).Log("msg", "Can't handle index type on node", "node", n.Label, "index", i, "type", indexNode.Type)
 					return
 				}
 				index.FixedSize = indexNode.FixedSize
@@ -357,7 +364,7 @@ func generateConfigModule(cfg *ModuleConfig, node *Node, nameToNode map[string]*
 					if prevType == subtype {
 						metric.Indexes = metric.Indexes[:len(metric.Indexes)-1]
 					} else {
-						log.Warnf("Error, can't handle index for node %s: %s without preceding %s", index.Type, subtype, n.Label)
+						level.Warn(logger).Log("msg", "Can't handle index type on node, missing preceding", "node", n.Label, "type", index.Type, "missing", subtype)
 						return
 					}
 				}
@@ -369,36 +376,61 @@ func generateConfigModule(cfg *ModuleConfig, node *Node, nameToNode map[string]*
 	}
 
 	// Apply lookups.
-	for _, lookup := range cfg.Lookups {
-		for _, metric := range out.Metrics {
+	for _, metric := range out.Metrics {
+		toDelete := []string{}
+		for _, lookup := range cfg.Lookups {
+			foundIndexes := 0
+			// See if all lookup indexes are present.
 			for _, index := range metric.Indexes {
-				if index.Labelname == lookup.OldIndex {
-					if _, ok := nameToNode[lookup.NewIndex]; !ok {
-						log.Fatalf("Unknown index '%s'", lookup.NewIndex)
-					}
-					indexNode := nameToNode[lookup.NewIndex]
-					// Avoid leaving the old labelname around.
-					index.Labelname = sanitizeLabelName(indexNode.Label)
-					typ, ok := metricType(indexNode.Type)
-					if !ok {
-						log.Fatalf("Unknown index type %s for %s", indexNode.Type, lookup.NewIndex)
-					}
-					metric.Lookups = append(metric.Lookups, &config.Lookup{
-						Labels:    []string{sanitizeLabelName(indexNode.Label)},
-						Labelname: sanitizeLabelName(indexNode.Label),
-						Type:      typ,
-						Oid:       indexNode.Oid,
-					})
-					// Make sure we walk the lookup OID(s).
-					if len(tableInstances[metric.Oid]) > 0 {
-						for _, index := range tableInstances[metric.Oid] {
-							needToWalk[indexNode.Oid+index+"."] = struct{}{}
-						}
-					} else {
-						needToWalk[indexNode.Oid] = struct{}{}
+				for _, lookupIndex := range lookup.SourceIndexes {
+					if index.Labelname == lookupIndex {
+						foundIndexes++
 					}
 				}
 			}
+			if foundIndexes == len(lookup.SourceIndexes) {
+				if _, ok := nameToNode[lookup.Lookup]; !ok {
+					return nil, fmt.Errorf("unknown index '%s'", lookup.Lookup)
+				}
+				indexNode := nameToNode[lookup.Lookup]
+				typ, ok := metricType(indexNode.Type)
+				if !ok {
+					return nil, fmt.Errorf("unknown index type %s for %s", indexNode.Type, lookup.Lookup)
+				}
+				l := &config.Lookup{
+					Labelname: sanitizeLabelName(indexNode.Label),
+					Type:      typ,
+					Oid:       indexNode.Oid,
+				}
+				for _, oldIndex := range lookup.SourceIndexes {
+					l.Labels = append(l.Labels, sanitizeLabelName(oldIndex))
+				}
+				metric.Lookups = append(metric.Lookups, l)
+				// Make sure we walk the lookup OID(s).
+				if len(tableInstances[metric.Oid]) > 0 {
+					for _, index := range tableInstances[metric.Oid] {
+						needToWalk[indexNode.Oid+index+"."] = struct{}{}
+					}
+				} else {
+					needToWalk[indexNode.Oid] = struct{}{}
+				}
+				if lookup.DropSourceIndexes {
+					// Avoid leaving the old labelname around.
+					toDelete = append(toDelete, lookup.SourceIndexes...)
+				}
+			}
+		}
+		for _, l := range toDelete {
+			metric.Lookups = append(metric.Lookups, &config.Lookup{
+				Labelname: sanitizeLabelName(l),
+			})
+		}
+	}
+
+	// Ensure index label names are sane.
+	for _, metric := range out.Metrics {
+		for _, index := range metric.Indexes {
+			index.Labelname = sanitizeLabelName(index.Labelname)
 		}
 	}
 
@@ -447,7 +479,7 @@ func generateConfigModule(cfg *ModuleConfig, node *Node, nameToNode map[string]*
 			out.Walk = append(out.Walk, k)
 		}
 	}
-	return out
+	return out, nil
 }
 
 var (

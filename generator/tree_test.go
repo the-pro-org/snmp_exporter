@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/go-kit/kit/log"
 	"github.com/prometheus/snmp_exporter/config"
 	yaml "gopkg.in/yaml.v2"
 )
@@ -151,7 +152,7 @@ func TestTreePrepare(t *testing.T) {
 			}
 		})
 
-		_ = prepareTree(c.in)
+		prepareTree(c.in, log.NewNopLogger())
 
 		if !reflect.DeepEqual(c.in, c.out) {
 			t.Errorf("prepareTree: difference in case %d", i)
@@ -396,7 +397,7 @@ func TestGenerateConfigModule(t *testing.T) {
 					{
 						Name: "BITSTRING",
 						Oid:  "1.12",
-						Type: "OctetString",
+						Type: "Bits",
 						Help: " - 1.12",
 					},
 					{
@@ -508,6 +509,40 @@ func TestGenerateConfigModule(t *testing.T) {
 						Oid:  "1.2",
 						Type: "DisplayString",
 						Help: " - 1.2",
+					},
+				},
+			},
+		},
+		// Enums
+		{
+			node: &Node{Oid: "1", Type: "OTHER", Label: "root",
+				Children: []*Node{
+					{Oid: "1.1", Access: "ACCESS_READONLY", Type: "INTEGER", Label: "node1", EnumValues: map[int]string{0: "a"}},
+					{Oid: "1.2", Access: "ACCESS_READONLY", Type: "INTEGER", Label: "node2", EnumValues: map[int]string{0: "b"}},
+				}},
+			cfg: &ModuleConfig{
+				Walk: []string{"root"},
+				Overrides: map[string]MetricOverrides{
+					"node1": MetricOverrides{Type: "EnumAsInfo"},
+					"node2": MetricOverrides{Type: "EnumAsStateSet"},
+				},
+			},
+			out: &config.Module{
+				Walk: []string{"1"},
+				Metrics: []*config.Metric{
+					{
+						Name:       "node1",
+						Oid:        "1.1",
+						Type:       "EnumAsInfo",
+						Help:       " - 1.1",
+						EnumValues: map[int]string{0: "a"},
+					},
+					{
+						Name:       "node2",
+						Oid:        "1.2",
+						Type:       "EnumAsStateSet",
+						Help:       " - 1.2",
+						EnumValues: map[int]string{0: "b"},
 					},
 				},
 			},
@@ -745,11 +780,11 @@ func TestGenerateConfigModule(t *testing.T) {
 						Name: "bitstringIndex",
 						Oid:  "1.2.1.1",
 						Help: " - 1.2.1.1",
-						Type: "OctetString",
+						Type: "Bits",
 						Indexes: []*config.Index{
 							{
 								Labelname: "bitstringIndex",
-								Type:      "OctetString",
+								Type:      "Bits",
 							},
 						},
 					},
@@ -761,7 +796,7 @@ func TestGenerateConfigModule(t *testing.T) {
 						Indexes: []*config.Index{
 							{
 								Labelname: "bitstringIndex",
-								Type:      "OctetString",
+								Type:      "Bits",
 							},
 						},
 					},
@@ -940,6 +975,53 @@ func TestGenerateConfigModule(t *testing.T) {
 				},
 			},
 		},
+		// One table lookup, lookup not walked, labels kept.
+		{
+			node: &Node{Oid: "1", Label: "root",
+				Children: []*Node{
+					{Oid: "1.1", Label: "octet",
+						Children: []*Node{
+							{Oid: "1.1.1", Label: "octetEntry", Indexes: []string{"octetIndex"},
+								Children: []*Node{
+									{Oid: "1.1.1.1", Access: "ACCESS_READONLY", Label: "octetIndex", Type: "INTEGER"},
+									{Oid: "1.1.1.2", Access: "ACCESS_READONLY", Label: "octetDesc", Type: "OCTETSTR"},
+									{Oid: "1.1.1.3", Access: "ACCESS_READONLY", Label: "octetFoo", Type: "INTEGER"}}}}}}},
+			cfg: &ModuleConfig{
+				Walk: []string{"octetFoo"},
+				Lookups: []*Lookup{
+					{
+						SourceIndexes: []string{"octetIndex"},
+						Lookup:        "octetDesc",
+					},
+				},
+			},
+			out: &config.Module{
+				// Walk is expanded to include the lookup OID.
+				Walk: []string{"1.1.1.2", "1.1.1.3"},
+				Metrics: []*config.Metric{
+					{
+						Name: "octetFoo",
+						Oid:  "1.1.1.3",
+						Help: " - 1.1.1.3",
+						Type: "gauge",
+						Indexes: []*config.Index{
+							{
+								Labelname: "octetIndex",
+								Type:      "gauge",
+							},
+						},
+						Lookups: []*config.Lookup{
+							{
+								Labels:    []string{"octetIndex"},
+								Labelname: "octetDesc",
+								Type:      "OctetString",
+								Oid:       "1.1.1.2",
+							},
+						},
+					},
+				},
+			},
+		},
 		// One table lookup, lookup not walked.
 		{
 			node: &Node{Oid: "1", Label: "root",
@@ -955,8 +1037,9 @@ func TestGenerateConfigModule(t *testing.T) {
 				Walk: []string{"octetFoo"},
 				Lookups: []*Lookup{
 					{
-						OldIndex: "octetIndex",
-						NewIndex: "octetDesc",
+						SourceIndexes:     []string{"octetIndex"},
+						Lookup:            "octetDesc",
+						DropSourceIndexes: true,
 					},
 				},
 			},
@@ -971,16 +1054,19 @@ func TestGenerateConfigModule(t *testing.T) {
 						Type: "gauge",
 						Indexes: []*config.Index{
 							{
-								Labelname: "octetDesc",
+								Labelname: "octetIndex",
 								Type:      "gauge",
 							},
 						},
 						Lookups: []*config.Lookup{
 							{
-								Labels:    []string{"octetDesc"},
+								Labels:    []string{"octetIndex"},
 								Labelname: "octetDesc",
 								Type:      "OctetString",
 								Oid:       "1.1.1.2",
+							},
+							{
+								Labelname: "octetIndex",
 							},
 						},
 					},
@@ -1002,8 +1088,9 @@ func TestGenerateConfigModule(t *testing.T) {
 				Walk: []string{"octetFoo"},
 				Lookups: []*Lookup{
 					{
-						OldIndex: "octetIndex",
-						NewIndex: "1.1.1.2",
+						SourceIndexes:     []string{"octetIndex"},
+						Lookup:            "1.1.1.2",
+						DropSourceIndexes: true,
 					},
 				},
 			},
@@ -1018,16 +1105,78 @@ func TestGenerateConfigModule(t *testing.T) {
 						Type: "gauge",
 						Indexes: []*config.Index{
 							{
-								Labelname: "octetDesc",
+								Labelname: "octetIndex",
 								Type:      "gauge",
 							},
 						},
 						Lookups: []*config.Lookup{
 							{
-								Labels:    []string{"octetDesc"},
+								Labels:    []string{"octetIndex"},
 								Labelname: "octetDesc",
 								Type:      "OctetString",
 								Oid:       "1.1.1.2",
+							},
+							{
+								Labelname: "octetIndex",
+							},
+						},
+					},
+				},
+			},
+		},
+		// Multi-index table lookup, lookup not walked.
+		{
+			node: &Node{Oid: "1", Label: "root",
+				Children: []*Node{
+					{Oid: "1.1", Label: "octet",
+						Children: []*Node{
+							{Oid: "1.1.1", Label: "octetEntry", Indexes: []string{"octetIndex", "octetIndex2"},
+								Children: []*Node{
+									{Oid: "1.1.1.1", Access: "ACCESS_READONLY", Label: "octetIndex", Type: "INTEGER"},
+									{Oid: "1.1.1.2", Access: "ACCESS_READONLY", Label: "octetIndex2", Type: "INTEGER"},
+									{Oid: "1.1.1.3", Access: "ACCESS_READONLY", Label: "octetDesc", Type: "OCTETSTR"},
+									{Oid: "1.1.1.4", Access: "ACCESS_READONLY", Label: "octetFoo", Type: "INTEGER"}}}}}}},
+			cfg: &ModuleConfig{
+				Walk: []string{"octetFoo"},
+				Lookups: []*Lookup{
+					{
+						SourceIndexes:     []string{"octetIndex", "octetIndex2"},
+						Lookup:            "octetDesc",
+						DropSourceIndexes: true,
+					},
+				},
+			},
+			out: &config.Module{
+				// Walk is expanded to include the lookup OID.
+				Walk: []string{"1.1.1.3", "1.1.1.4"},
+				Metrics: []*config.Metric{
+					{
+						Name: "octetFoo",
+						Oid:  "1.1.1.4",
+						Help: " - 1.1.1.4",
+						Type: "gauge",
+						Indexes: []*config.Index{
+							{
+								Labelname: "octetIndex",
+								Type:      "gauge",
+							},
+							{
+								Labelname: "octetIndex2",
+								Type:      "gauge",
+							},
+						},
+						Lookups: []*config.Lookup{
+							{
+								Labels:    []string{"octetIndex", "octetIndex2"},
+								Labelname: "octetDesc",
+								Type:      "OctetString",
+								Oid:       "1.1.1.3",
+							},
+							{
+								Labelname: "octetIndex",
+							},
+							{
+								Labelname: "octetIndex2",
 							},
 						},
 					},
@@ -1072,8 +1221,9 @@ func TestGenerateConfigModule(t *testing.T) {
 				Walk: []string{"octet^Foo"},
 				Lookups: []*Lookup{
 					{
-						OldIndex: "octet&Index",
-						NewIndex: "1.1.1.2",
+						SourceIndexes:     []string{"octet&Index"},
+						Lookup:            "1.1.1.2",
+						DropSourceIndexes: true,
 					},
 				},
 			},
@@ -1088,16 +1238,19 @@ func TestGenerateConfigModule(t *testing.T) {
 						Help: " - 1.1.1.3",
 						Indexes: []*config.Index{
 							{
-								Labelname: "octet_Desc",
+								Labelname: "octet_Index",
 								Type:      "gauge",
 							},
 						},
 						Lookups: []*config.Lookup{
 							{
-								Labels:    []string{"octet_Desc"},
+								Labels:    []string{"octet_Index"},
 								Labelname: "octet_Desc",
 								Type:      "OctetString",
 								Oid:       "1.1.1.2",
+							},
+							{
+								Labelname: "octet_Index",
 							},
 						},
 					},
@@ -1231,8 +1384,9 @@ func TestGenerateConfigModule(t *testing.T) {
 				Walk: []string{"1.1.1.2.100", "1.1.1.4.100", "1.1.1.2.200"},
 				Lookups: []*Lookup{
 					{
-						OldIndex: "tableIndex",
-						NewIndex: "tableDesc",
+						SourceIndexes:     []string{"tableIndex"},
+						Lookup:            "tableDesc",
+						DropSourceIndexes: true,
 					},
 				},
 			},
@@ -1246,16 +1400,19 @@ func TestGenerateConfigModule(t *testing.T) {
 						Help: " - 1.1.1.2",
 						Indexes: []*config.Index{
 							{
-								Labelname: "tableDesc",
+								Labelname: "tableIndex",
 								Type:      "gauge",
 							},
 						},
 						Lookups: []*config.Lookup{
 							{
-								Labels:    []string{"tableDesc"},
+								Labels:    []string{"tableIndex"},
 								Labelname: "tableDesc",
 								Type:      "OctetString",
 								Oid:       "1.1.1.3",
+							},
+							{
+								Labelname: "tableIndex",
 							},
 						},
 					},
@@ -1266,16 +1423,19 @@ func TestGenerateConfigModule(t *testing.T) {
 						Help: " - 1.1.1.4",
 						Indexes: []*config.Index{
 							{
-								Labelname: "tableDesc",
+								Labelname: "tableIndex",
 								Type:      "gauge",
 							},
 						},
 						Lookups: []*config.Lookup{
 							{
-								Labels:    []string{"tableDesc"},
+								Labels:    []string{"tableIndex"},
 								Labelname: "tableDesc",
 								Type:      "OctetString",
 								Oid:       "1.1.1.3",
+							},
+							{
+								Labelname: "tableIndex",
 							},
 						},
 					},
@@ -1298,8 +1458,9 @@ func TestGenerateConfigModule(t *testing.T) {
 				Walk: []string{"1.1.1.2.100", "1.1.1.3"},
 				Lookups: []*Lookup{
 					{
-						OldIndex: "tableIndex",
-						NewIndex: "tableDesc",
+						SourceIndexes:     []string{"tableIndex"},
+						Lookup:            "tableDesc",
+						DropSourceIndexes: true,
 					},
 				},
 			},
@@ -1314,16 +1475,19 @@ func TestGenerateConfigModule(t *testing.T) {
 						Help: " - 1.1.1.2",
 						Indexes: []*config.Index{
 							{
-								Labelname: "tableDesc",
+								Labelname: "tableIndex",
 								Type:      "gauge",
 							},
 						},
 						Lookups: []*config.Lookup{
 							{
-								Labels:    []string{"tableDesc"},
+								Labels:    []string{"tableIndex"},
 								Labelname: "tableDesc",
 								Type:      "OctetString",
 								Oid:       "1.1.1.3",
+							},
+							{
+								Labelname: "tableIndex",
 							},
 						},
 					},
@@ -1334,16 +1498,19 @@ func TestGenerateConfigModule(t *testing.T) {
 						Help: " - 1.1.1.3",
 						Indexes: []*config.Index{
 							{
-								Labelname: "tableDesc",
+								Labelname: "tableIndex",
 								Type:      "gauge",
 							},
 						},
 						Lookups: []*config.Lookup{
 							{
-								Labels:    []string{"tableDesc"},
+								Labels:    []string{"tableIndex"},
 								Labelname: "tableDesc",
 								Type:      "OctetString",
 								Oid:       "1.1.1.3",
+							},
+							{
+								Labelname: "tableIndex",
 							},
 						},
 					},
@@ -1715,8 +1882,11 @@ func TestGenerateConfigModule(t *testing.T) {
 			}
 		}
 
-		nameToNode := prepareTree(c.node)
-		got := generateConfigModule(c.cfg, c.node, nameToNode)
+		nameToNode := prepareTree(c.node, log.NewNopLogger())
+		got, err := generateConfigModule(c.cfg, c.node, nameToNode, log.NewNopLogger())
+		if err != nil {
+			t.Errorf("Error generating config in case %d: %s", i, err)
+		}
 		if !reflect.DeepEqual(got, c.out) {
 			t.Errorf("GenerateConfigModule: difference in case %d", i)
 			out, _ := yaml.Marshal(got)

@@ -122,6 +122,12 @@ Running this example gives the following output (from my printer):
 * `examples/example3.go` demonstrates `SNMPv3`
 * `examples/trapserver.go` demonstrates writing an SNMP v2c trap server
 
+MIB Parser
+----------
+
+I don't have any plans to write a mib parser. Others have suggested
+https://github.com/sleepinggenius2/gosmi
+
 Contributions
 -------------
 
@@ -223,6 +229,10 @@ Tests are grouped as follows:
 
 The generic end-to-end integration test `generic_e2e_test.go` should
 work against any SNMP MIB-2 compliant host (e.g. a router, NAS box, printer).
+
+Mocks were generated using:
+
+`mockgen -source=interface.go -destination=mocks/gosnmp_mock.go -package=mocks`
 
 To profile cpu usage:
 
